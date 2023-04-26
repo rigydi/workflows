@@ -1,0 +1,146 @@
+name: "Terraform Plan - Reusable Workflow"
+on:
+  workflow_call:
+    inputs:
+      ########################################################
+      # Terraform AZURERM Backend
+      # https://developer.hashicorp.com/terraform/language/settings/backends/azurerm
+      ########################################################
+      backend_resource_group_name:
+        description: "The Azure resource group in which the backend storage account is located."
+        required: true
+        type: string
+      backend_storage_account_name:
+        description: "The name of the Azure backend storage account."
+        required: true
+        type: string
+      backend_container_name:
+        description: "The name of the Azure backend blob container name."
+        required: true
+        type: string
+      backend_statefile_name:
+        description: "The name of the Terraform state file stored in the backend storage."
+        required: true
+        type: string
+      ########################################################
+      # Github
+      ########################################################
+      # https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment
+      github_environment:
+        description: "The GitHub environment used as deployment stages."
+        required: false
+        type: string
+        default: null
+      ########################################################
+      # Terraform
+      ########################################################
+      # https://github.com/hashicorp/terraform/blob/main/CHANGELOG.md
+      terraform_version:
+        description: "The Terraform client version, e.g. 1.4.5"
+        required: false
+        type: string
+        default: latest
+      # https://developer.hashicorp.com/terraform/language/values/variables#variable-definitions-tfvars-files
+      tfvars_filename:
+        description: "The Terraform tfvars file."
+        required: true
+        type: string
+      working_directory:
+        description: "The path to the Terraform configuration files."
+        required: true
+        type: string
+
+    secrets:
+      ########################################################
+      # Terraform Azure Provider Authentication
+      # https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/guides/service_principal_client_secret#configuring-the-service-principal-in-terraform
+      ########################################################
+      arm_tenant_id:
+        description: "The Azure tenant ID."
+        required: true
+        type: string
+      arm_backend_subscription_id:
+        description: "The Azure subscription ID."
+        required: true
+        type: string
+      arm_client_id:
+        description: "The Service Principal client ID."
+        required: true
+        type: string
+      arm_client_secret:
+        description: "The Service Principal secret."
+        required: true
+        type: string
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.github_environment }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+
+    env:
+      # Azure Backend
+      BACKEND_RESOURCE_GROUP_NAME: ${{ inputs.backend_resource_group_name }}
+      BACKEND_STORAGE_ACCOUNT_NAME: ${{ inputs.backend_storage_account_name }}
+      BACKEND_CONTAINER_NAME: ${{ inputs.backend_container_name }}
+      BACKEND_STATEFILE_NAME: ${{ inputs.backend_statefile_name }}
+      # Terraform azurerm provider authentication using Service Principal with client secret
+      ARM_TENANT_ID: ${{ secrets.arm_tenant_id }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.arm_backend_subscription_id }}
+      ARM_CLIENT_ID: ${{ secrets.arm_client_id }}
+      ARM_CLIENT_SECRET: ${{ secrets.arm_client_secret }}
+      # Terraform variables
+      TF_VARS: ${{ inputs.tfvars_filename }}
+
+    steps:
+      # https://github.com/marketplace/actions/checkout
+      - name: Preparations - on Runner - cloning Git Repository
+        uses: actions/checkout@v3
+
+      # https://github.com/marketplace/actions/hashicorp-setup-terraform
+      - name: Preparations - on Runner - installing Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+      
+      # https://developer.hashicorp.com/terraform/cli/commands/fmt
+      - name: Preparations - with Terraform - executing Terraform fmt
+        run: terraform fmt --check
+
+      # https://developer.hashicorp.com/terraform/cli/commands/init
+      - name: Preparations - with Terraform - executing Terraform Init
+        run: |
+          terraform init \
+          --backend-config="resource_group_name=$BACKEND_RESOURCE_GROUP_NAME" \
+          --backend-config="storage_account_name=$BACKEND_STORAGE_ACCOUNT_NAME" \
+          --backend-config="container_name=$BACKEND_CONTAINER_NAME" \
+          --backend-config="key=$BACKEND_STATEFILE_NAME"
+
+      # https://developer.hashicorp.com/terraform/cli/commands/validate
+      - name: Preparations - with Terraform - executing Terraform Validate
+        run: terraform validate
+
+      # https://developer.hashicorp.com/terraform/cli/commands/plan
+      - name: Execution - with Terraform - executing Terraform Plan
+        id: plan
+        run: terraform plan --var-file=$TF_VARS --out=plan.tfplan
+        continue-on-error: true
+
+      - name: Post Execution Steps - on Runner - checking Return Code of Terraform Plan
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Post Execution Steps - on Runner - zipping Terraform Files
+        run: zip -r ${{ inputs.backend_statefile_name }}.zip ./*
+
+      # https://github.com/actions/upload-artifact
+      - name: Post Execution Steps - on Runner - uploading Terraform Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: "${{ inputs.backend_statefile_name }}"
+          path: "${{ inputs.working_directory }}/${{ inputs.backend_statefile_name }}.zip"
+          retention-days: 7
